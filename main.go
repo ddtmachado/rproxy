@@ -83,9 +83,10 @@ func (p *MyProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *MyProxy) fetchResponse(r *http.Request) (*http.Response, error) {
 	var response *http.Response
 
+	shouldCache := r.Method == http.MethodGet
 	rHash := hashRequest(r)
 	//Check cache
-	if cacheData, exists := p.memoryCache[rHash]; exists {
+	if cacheData, exists := p.memoryCache[rHash]; exists && shouldCache {
 		if time.Now().Before(cacheData.expiresAt) {
 			log.Printf("cache hit %s", rHash)
 			respReader := bufio.NewReader(bytes.NewReader(cacheData.data))
@@ -114,7 +115,7 @@ func (p *MyProxy) fetchResponse(r *http.Request) (*http.Response, error) {
 
 	log.Printf("sending request: %v", pRequest)
 	response, err := http.DefaultTransport.RoundTrip(pRequest)
-	if err == nil {
+	if shouldCache && err == nil {
 		//Add to cache
 		dumpedBody, err := httputil.DumpResponse(response, true)
 		p.memoryCache[rHash] = NewMemCache(dumpedBody)
