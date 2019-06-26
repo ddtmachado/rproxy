@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha1"
-	"encoding/gob"
 	"flag"
 	"fmt"
 	"io"
@@ -48,11 +47,19 @@ func NewMemCache(data []byte) *MemCache {
 type MyProxy struct {
 	target      *url.URL
 	memoryCache map[string]*MemCache
+	transport   *http.Transport
 }
 
 //NewProxy return an initialized MyProxy struct pointing to the target URL
 func NewProxy(target *url.URL) *MyProxy {
-	return &MyProxy{target, make(map[string]*MemCache)}
+	return &MyProxy{
+		target:      target,
+		memoryCache: make(map[string]*MemCache),
+		transport: &http.Transport{
+			Dial: (&net.Dialer{
+				Timeout: 5 * time.Second,
+			}).Dial},
+	}
 }
 
 //Run starts the proxy server at the specified local address
@@ -104,19 +111,23 @@ func (p *MyProxy) fetchResponse(r *http.Request) (*http.Response, error) {
 	//Creates the new request to the target proxy URL
 	pRequest := r.WithContext(r.Context())
 	pRequest.Header = cloneHeader(r.Header)
-	pRequest.URL = p.target.ResolveReference(r.URL)
+	pRequest.URL = p.target.ResolveReference(asRelativeURL(r.URL))
+	pRequest.Host = p.target.Host
 	pRequest.URL.Scheme = p.target.Scheme
 	pRequest.URL.Host = p.target.Host
 	pRequest.Header.Set("User-Agent", "")
-	pRequest.Close = false
+	pRequest.Header.Add("X-Forwarded-Host", r.Host)
+	pRequest.Header.Add("X-Origin-Host", p.target.Host)
 	if clientIP, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		pRequest.Header.Set("X-Forwarded-For", clientIP)
 	}
+	pRequest.Close = false
 
 	log.Printf("sending request: %v", pRequest)
-	response, err := http.DefaultTransport.RoundTrip(pRequest)
+	response, err := p.transport.RoundTrip(pRequest)
+
+	//Add to cache
 	if shouldCache && err == nil {
-		//Add to cache
 		dumpedBody, err := httputil.DumpResponse(response, true)
 		p.memoryCache[rHash] = NewMemCache(dumpedBody)
 		if err != nil {
@@ -126,13 +137,26 @@ func (p *MyProxy) fetchResponse(r *http.Request) (*http.Response, error) {
 	return response, err
 }
 
+//asRelativeURL returns a new url.URL without absolute path information
+func asRelativeURL(u *url.URL) *url.URL {
+	return &url.URL{
+		Scheme:     "",
+		Opaque:     u.Opaque,
+		User:       nil,
+		Host:       "",
+		Path:       u.Path,
+		RawPath:    u.RawPath,
+		ForceQuery: u.ForceQuery,
+		RawQuery:   u.RawQuery,
+		Fragment:   u.Fragment,
+	}
+}
+
 func hashRequest(r *http.Request) string {
 	//Trying to hash an http request without bothering
 	//with it's internal structure and order of attributes
-	var b bytes.Buffer
-	gob.NewEncoder(&b).Encode(r)
 	hashedBytes := sha1.New()
-	hashedBytes.Write(b.Bytes())
+	hashedBytes.Write([]byte(r.URL.String()))
 	return fmt.Sprintf("%x", hashedBytes.Sum(nil))
 }
 
